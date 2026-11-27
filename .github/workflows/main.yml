@@ -2,43 +2,81 @@ name: APK Olustur
 
 on:
   push:
+    branches: [main, master]
   workflow_dispatch:
 
 jobs:
-  build:
+  apk:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Zip dosyasini ac
+      - name: Depodaki ZIP'i ac
         run: |
-          unzip -q *.zip -d _src
-          mkdir app
-          cp -a _src/*/. app/
+          ZIP="$(find . -maxdepth 2 -name '*.zip' -not -path './.git/*' -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)"
+          test -n "$ZIP" || { echo "Depoda ZIP bulunamadi"; exit 1; }
+          echo "ZIP: $ZIP"
+          mkdir -p _build
+          unzip -q "$ZIP" -d _build
+          PUB="$(find _build -maxdepth 3 -name pubspec.yaml -print -quit)"
+          test -n "$PUB" || { echo "pubspec.yaml bulunamadi"; exit 1; }
+          echo "ROOT=$(dirname "$PUB")" >> "$GITHUB_ENV"
 
       - uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '17'
 
       - uses: subosito/flutter-action@v2
         with:
-          channel: 'stable'
+          flutter-version: '3.27.4'
+          channel: stable
+          cache: true
 
-      - name: Android klasorunu olustur
-        working-directory: app
+      - name: Cakisan .kts dosyalarini ve eksik Gradle wrapper'i duzelt
+        working-directory: ${{ env.ROOT }}
         run: |
-          flutter create . --platforms=android --org com.sansar --project-name gunun_sorusu
-          rm -f test/widget_test.dart
-          sed -i 's/android:label="[^"]*"/android:label="İlim Yarışı"/' android/app/src/main/AndroidManifest.xml
+          rm -f android/build.gradle.kts android/settings.gradle.kts android/app/build.gradle.kts
+          if [ ! -f android/gradlew ] || [ ! -f android/gradle/wrapper/gradle-wrapper.jar ]; then
+            flutter create --platforms=android --project-name wrapper_tpl /tmp/tpl >/dev/null
+            cp -n /tmp/tpl/android/gradlew android/gradlew
+            cp -n /tmp/tpl/android/gradlew.bat android/gradlew.bat
+            mkdir -p android/gradle/wrapper
+            cp -n /tmp/tpl/android/gradle/wrapper/gradle-wrapper.jar android/gradle/wrapper/gradle-wrapper.jar
+            chmod +x android/gradlew
+          fi
 
-      - name: Derle
-        working-directory: app
+      - name: Paketleri al
+        working-directory: ${{ env.ROOT }}
+        run: flutter pub get
+
+      - name: Analiz (hata olursa derlemeyi durdurmaz)
+        working-directory: ${{ env.ROOT }}
+        continue-on-error: true
+        run: flutter analyze --no-fatal-infos
+
+      - name: Test (hata olursa derlemeyi durdurmaz)
+        working-directory: ${{ env.ROOT }}
+        continue-on-error: true
+        run: flutter test
+
+      - name: APK derle
+        working-directory: ${{ env.ROOT }}
+        env:
+          FIREBASE_API_KEY: ${{ secrets.FIREBASE_API_KEY }}
+          FIREBASE_APP_ID: ${{ secrets.FIREBASE_APP_ID }}
+          FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+          FIREBASE_SENDER_ID: ${{ secrets.FIREBASE_SENDER_ID }}
         run: |
-          flutter pub get
-          flutter build apk --release
+          flutter build apk --release \
+            --dart-define=FIREBASE_API_KEY="$FIREBASE_API_KEY" \
+            --dart-define=FIREBASE_APP_ID="$FIREBASE_APP_ID" \
+            --dart-define=FIREBASE_PROJECT_ID="$FIREBASE_PROJECT_ID" \
+            --dart-define=FIREBASE_SENDER_ID="$FIREBASE_SENDER_ID"
+          ls -l build/app/outputs/flutter-apk/app-release.apk
 
       - uses: actions/upload-artifact@v4
         with:
-          name: app-release
-          path: app/build/app/outputs/flutter-apk/app-release.apk
+          name: ilim-yarisi-apk
+          path: ${{ env.ROOT }}/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
